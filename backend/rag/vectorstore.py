@@ -180,24 +180,38 @@ class QdrantVectorStore(IVectorStore):  # pragma: no cover - needs qdrant server
         return int(r.json()["result"]["count"])
 
 
-_store: IVectorStore | None = None
+_stores: dict[tuple, IVectorStore] = {}
+_store_lock = threading.Lock()
 
 
 def reset_vector_store() -> None:
-    """Test hook: drop the cached singleton (e.g. after changing AIQBE_DATA_DIR)."""
-    global _store
-    _store = None
+    """Test hook: drop all cached store instances."""
+    with _store_lock:
+        _stores.clear()
 
 
 def get_vector_store() -> IVectorStore:
-    global _store
-    if _store is None:
-        from backend.core.config import get_settings
-        s = get_settings()
-        kind = getattr(s, "vector_store", "local_json")
-        if kind == "qdrant":
-            _store = QdrantVectorStore(getattr(s, "qdrant_url", "http://localhost:6333"))
-        else:
-            base = getattr(s, "data_dir", "./data")
-            _store = LocalJsonVectorStore(os.path.join(base, "vector_index.json"))
-    return _store
+    """Return the vector store for the CURRENT settings.
+
+    The cache is keyed by (kind, location) rather than being a single global:
+    when data_dir changes between tests or deployments, a stale index bound to
+    the old directory can never leak into retrieval (this was a real source of
+    cross-test contamination and would equally affect runtime reconfiguration).
+    """
+    from backend.core.config import get_settings
+    s = get_settings()
+    kind = getattr(s, "vector_store", "local_json")
+    if kind == "qdrant":
+        key = ("qdrant", getattr(s, "qdrant_url", "http://localhost:6333"))
+    else:
+        base = getattr(s, "data_dir", "./data")
+        key = ("local_json", os.path.abspath(os.path.join(base, "vector_index.json")))
+    with _store_lock:
+        store = _stores.get(key)
+        if store is None:
+            if kind == "qdrant":
+                store = QdrantVectorStore(key[1])  # pragma: no cover
+            else:
+                store = LocalJsonVectorStore(key[1])
+            _stores[key] = store
+        return store

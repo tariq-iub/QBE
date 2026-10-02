@@ -33,6 +33,23 @@ def client(app):
         yield ctx
 
 
+@pytest.fixture(autouse=True)
+def isolated_vector_store(tmp_path, monkeypatch):
+    """Each test gets its own vector-index directory.
+
+    Without this, tests sharing one on-disk index leak chunks into each other's
+    retrieval results (order-dependent failures). The store cache is keyed by
+    location, so pointing data_dir at a fresh tmp dir fully isolates every test.
+    """
+    from backend.core.config import get_settings
+    from backend.rag.vectorstore import reset_vector_store
+
+    monkeypatch.setattr(get_settings(), "data_dir", str(tmp_path))
+    reset_vector_store()
+    yield
+    reset_vector_store()
+
+
 @pytest.fixture()
 def db_session():
     from backend.database.session import SessionLocal, init_db
