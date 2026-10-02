@@ -174,9 +174,20 @@ def test_pack_grounding_and_data_fencing(db_session, topic_row, tmp_path, monkey
     pack0 = build_pack(db_session, topic_row.id)
     assert not pack0.has_grounding()
 
-    ingest_bytes(db_session, data=_sample_doc_bytes(), filename="g.txt",
+    r_ing = ingest_bytes(db_session, data=_sample_doc_bytes(), filename="g.txt",
                  topic_ids=[topic_row.id], storage_dir=str(tmp_path))
+    from backend.models.entities import DocumentChunk as _DC
+    from backend.rag.vectorstore import get_vector_store as _gvs
+    _st = _gvs()
+    print("DBG ingest result:", r_ing, "store:", getattr(_st, "_path", None), "count:", _st.count())
+    print("DBG chunks in db:", db_session.query(_DC).count())
+    if _st.count():
+        pid = next(iter(_st._points))
+        print("DBG payload topic_ids:", _st._points[pid]["payload"].get("topic_ids"), "query topic:", topic_row.id)
     pack = build_pack(db_session, topic_row.id)
+    from backend.rag.vectorstore import get_vector_store as _gvs
+    _st = _gvs()
+    print("DBG store path:", getattr(_st, "_path", None), "count:", _st.count())
     assert pack.has_grounding()
     blocks = pack.context_blocks()
     assert "BEGIN REFERENCE DATA 1" in blocks
