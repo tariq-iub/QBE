@@ -122,7 +122,9 @@ def process_batch(db: Session, job: GenerationJob, batch: BatchPlan, *,
     for mcq in payload["questions"][:batch.count]:
         res = validate_mcq(mcq, num_options=job.num_options)
         status = MCQStatus.GENERATED if res.ok else MCQStatus.INVALID
-        stored = mcq if res.ok else shuffle_options(mcq, rng)  # shuffle only valid items
+        # §15: position randomization applies to structurally valid items only;
+        # rejected/INVALID candidates keep the raw generated order as evidence.
+        stored = shuffle_options(mcq, rng) if res.ok else mcq
         cand = _persist_candidate(db, job, batch, stored, model, prompt, params,
                                   status=status)
         db.add(MCQValidationResult(
