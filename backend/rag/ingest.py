@@ -26,8 +26,12 @@ class IngestError(ValueError):
 def ingest_bytes(db: Session, *, data: bytes, filename: str, title: str | None = None,
                  origin: str = "local", url: str | None = None,
                  license_note: str | None = None, topic_ids: list[int] | None = None,
-                 storage_dir: str | None = None) -> dict:
-    """Idempotent ingestion of one document. Returns summary dict."""
+                 storage_dir: str | None = None,
+                 preextracted_text: str | None = None) -> dict:
+    """Idempotent ingestion of one document. Returns summary dict.
+
+    `preextracted_text`: caller already extracted+sanitized the text (web HTML
+    path); skip byte-extraction and chunk this text directly."""
     if not data:
         raise IngestError("empty file")
     s = get_settings()
@@ -69,7 +73,10 @@ def ingest_bytes(db: Session, *, data: bytes, filename: str, title: str | None =
     db.flush()
 
     try:
-        pages = textproc.extract_bytes(filename, data)
+        if preextracted_text is not None:
+            pages = [textproc.RawPage(page=None, section=None, text=preextracted_text)]
+        else:
+            pages = textproc.extract_bytes(filename, data)
     except (ValueError, RuntimeError) as e:
         # unsupported type or corrupt/unparseable file (e.g. image-only PDF with
         # no object structure) -> surface as IngestError, roll back staged rows

@@ -74,6 +74,33 @@ def _context_blocks_for_topic(db: Session, topic_id: int):
     return pack.context_blocks(), pack.chunk_map(), pack.citations()
 
 
+def ensure_topic_grounding(db: Session, job: GenerationJob, topic_id: int) -> None:
+    """Phase 4: when a job enables internet retrieval, top up the topic's
+    knowledge base from approved web sources BEFORE generation needs it.
+
+    Failures are logged and swallowed: local-only grounding (or skipping the
+    topic entirely at pack time) remains correct behaviour (§20/§46)."""
+    if not job.retrieval_enabled:
+        return
+    import logging
+
+    from backend.retrieval.webresearch import load_domain_policy, research_topic
+
+    policy = load_domain_policy()
+    if policy is None or not policy.enabled:
+        logging.getLogger("aiqbe.pipeline").warning(
+            "job %s requests retrieval but no valid policy; continuing local-only",
+            job.id)
+        return
+    try:
+        research_topic(db, topic_id, policy=policy)
+    except Exception:                              # noqa: BLE001 — never kill a job
+        db.rollback()
+        logging.getLogger("aiqbe.pipeline").exception(
+            "web research failed for topic %s (job %s); continuing local-only",
+            topic_id, job.id)
+
+
 def _persist_candidate(db: Session, job: GenerationJob, batch: BatchPlan, mcq: dict,
                        model: GenerationModel, prompt: PromptTemplate,
                        params: GenParams, *, status: str,
@@ -232,6 +259,7 @@ def process_job(db: Session, job_id: int, provider: ILLMProvider | None = None) 
     resume_from = _get_checkpoint(db, job.id, "generate")
     stats = {"generated": 0, "persisted": 0, "invalid": 0,
              "batches_run": 0, "batches_skipped": 0}
+    researched: set[int] = set()
     for idx, batch in enumerate(plan.batches):
         if idx < resume_from:
             stats["batches_skipped"] += 1
@@ -239,6 +267,10 @@ def process_job(db: Session, job_id: int, provider: ILLMProvider | None = None) 
         db.refresh(job)
         if job.status in (JobStatus.PAUSED, JobStatus.CANCELLED):
             break
+        if batch.topic_id not in researched:
+            # Phase 4: one bounded web-research pass per topic when enabled.
+            ensure_topic_grounding(db, job, batch.topic_id)
+            researched.add(batch.topic_id)
         out = process_batch(db, job, batch, provider=provider, model=model,
                             prompt=prompt, rng=rng)
         stats["generated"] += out.generated
