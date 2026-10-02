@@ -107,8 +107,19 @@ class LocalJsonVectorStore(IVectorStore):
     def upsert(self, points: list[VectorPoint]) -> None:
         with self._lock:
             for p in points:
+                # Normalize the payload topic key to a list. Callers may pass a
+                # scalar (single-topic ingestion) or a list; _payload_matches
+                # overlap semantics only work when the stored value is iterable,
+                # and a bare int would make every filtered search silently miss
+                # this point (empty evidence packs).
+                payload = dict(p.payload)
+                tids = payload.get("topic_ids")
+                if not isinstance(tids, (list, tuple)):
+                    payload["topic_ids"] = [tids] if tids is not None else []
+                else:
+                    payload["topic_ids"] = list(tids)
                 self._points[p.point_id] = {
-                    "vector": [round(v, 6) for v in p.vector], "payload": p.payload}
+                    "vector": [round(v, 6) for v in p.vector], "payload": payload}
             self._flush()
 
     def delete_by_payload(self, flt: dict) -> int:
@@ -180,38 +191,48 @@ class QdrantVectorStore(IVectorStore):  # pragma: no cover - needs qdrant server
         return int(r.json()["result"]["count"])
 
 
-_stores: dict[tuple, IVectorStore] = {}
+_store: IVectorStore | None = None
+_store_key: tuple | None = None
 _store_lock = threading.Lock()
 
 
 def reset_vector_store() -> None:
-    """Test hook: drop all cached store instances."""
+    """Test hook / reconfiguration hook: force the next get_vector_store() call
+    to bind to the CURRENT settings."""
+    global _store, _store_key
     with _store_lock:
-        _stores.clear()
+        _store = None
+        _store_key = None
 
 
-def get_vector_store() -> IVectorStore:
-    """Return the vector store for the CURRENT settings.
-
-    The cache is keyed by (kind, location) rather than being a single global:
-    when data_dir changes between tests or deployments, a stale index bound to
-    the old directory can never leak into retrieval (this was a real source of
-    cross-test contamination and would equally affect runtime reconfiguration).
-    """
+def _current_key() -> tuple:
     from backend.core.config import get_settings
     s = get_settings()
     kind = getattr(s, "vector_store", "local_json")
     if kind == "qdrant":
-        key = ("qdrant", getattr(s, "qdrant_url", "http://localhost:6333"))
-    else:
-        base = getattr(s, "data_dir", "./data")
-        key = ("local_json", os.path.abspath(os.path.join(base, "vector_index.json")))
+        return ("qdrant", getattr(s, "qdrant_url", "http://localhost:6333"))
+    base = getattr(s, "data_dir", "./data")
+    return ("local_json", os.path.abspath(os.path.join(base, "vector_index.json")))
+
+
+def get_vector_store() -> IVectorStore:
+    """Return the singleton vector store, rebinding automatically when the
+    configured location changes.
+
+    A pure (kind, location)-keyed cache silently broke idempotent re-ingestion:
+    the ingest fast-path returns before touching the store, so after a
+    test/deploy reset nothing ever re-instantiated the store at the new path and
+    retrieval saw an empty index while the DB held chunks. Rebinding on every
+    access against current settings removes that class of bug; callers holding
+    long-lived references are discouraged (always call get_vector_store()).
+    """
+    global _store, _store_key
+    key = _current_key()
     with _store_lock:
-        store = _stores.get(key)
-        if store is None:
-            if kind == "qdrant":
-                store = QdrantVectorStore(key[1])  # pragma: no cover
+        if _store is None or _store_key != key:
+            if key[0] == "qdrant":
+                _store = QdrantVectorStore(key[1])  # pragma: no cover
             else:
-                store = LocalJsonVectorStore(key[1])
-            _stores[key] = store
-        return store
+                _store = LocalJsonVectorStore(key[1])
+            _store_key = key
+        return _store
