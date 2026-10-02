@@ -51,6 +51,19 @@ class Settings(BaseSettings):
     internet_retrieval_enabled: bool = False
     domain_policy_path: str = "deployment/domain_policy.yaml"
 
+    # --- RAG / embeddings / vector store (Phase 3) ---------------------
+    data_dir: str = "./data"
+    embedding_provider: str = "hashed_ngram"           # hashed_ngram | sentence_transformers
+    embedding_model: str = "BAAI/bge-small-en-v1.5"    # used when provider=ST
+    embedding_dim: int = 512                           # hashed embedder dimension
+    vector_store: str = "local_json"                   # local_json | qdrant
+    qdrant_url: str = "http://127.0.0.1:6333"
+    chunk_target_tokens: int = 300
+    chunk_overlap_tokens: int = 40
+    retrieval_top_k: int = 8
+    retrieval_min_score: float = 0.05                  # tuned in Phase-3 eval
+    max_upload_mb: int = 50
+
     # --- logging --------------------------------------------------------
     log_level: str = "INFO"
 
