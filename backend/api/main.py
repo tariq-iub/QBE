@@ -35,9 +35,10 @@ def create_app() -> FastAPI:
         if s.secret_key.startswith("DEV-ONLY"):
             raise RuntimeError("refusing to start production with the dev secret key")
 
-    from backend.api.v1 import auth, jobs, questions, subjects
+    from backend.api.v1 import auth, documents, jobs, questions, subjects
     app.include_router(auth.router, prefix=s.api_prefix)
     app.include_router(subjects.router, prefix=s.api_prefix)
+    app.include_router(documents.router, prefix=s.api_prefix)
     app.include_router(jobs.router, prefix=s.api_prefix)
     app.include_router(questions.router, prefix=s.api_prefix)
 

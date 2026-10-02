@@ -35,6 +35,10 @@ _MANY_BLANK = re.compile(r"\n{3,}")
 _SOFT_HYPHEN_RE = re.compile(r"\u00ad")
 # Hyphenated line-breaks from justified PDFs: "resolu-\ntion" -> "resolution"
 _HYPHEN_BREAK = re.compile(r"(\w)-\n(\w)")
+# Running headers/footers emitted by PDF page renderers, e.g. "page 12 of 300",
+# or bare page numbers on their own line.
+_PAGINATION_LINE = re.compile(
+    r"^\s*(?:page\s+\d+(?:\s+of\s+\d+)?|\d+\s*/\s*\d+|\d{1,4})\s*$", re.IGNORECASE)
 # Common PDF ligature artifacts
 _LIGATURES = {"\ufb00": "ff", "\ufb01": "fi", "\ufb02": "fl", "\ufb03": "ffi",
               "\ufb04": "ffl", "\ufb05": "st", "\ufb06": "st"}
@@ -50,6 +54,8 @@ def clean_text(raw: str) -> str:
     t = _SOFT_HYPHEN_RE.sub("", t)
     t = _HYPHEN_BREAK.sub(r"\1\2", t)
     t = _WS_RUN.sub(" ", t)
+    lines = [ln for ln in t.split("\n") if not _PAGINATION_LINE.match(ln)]
+    t = "\n".join(lines)
     t = _MANY_BLANK.sub("\n\n", t)
     return t.strip()
 
