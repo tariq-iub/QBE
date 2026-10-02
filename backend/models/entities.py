@@ -272,6 +272,7 @@ class SourceDocument(Base):
     file_hash: Mapped[str] = mapped_column(sa.String(64), index=True)
     storage_path: Mapped[str | None] = mapped_column(sa.String(1024))
     extracted_at: Mapped[dt.datetime | None] = mapped_column(sa.DateTime)
+    source: Mapped["AcademicSource"] = relationship()
 
 
 class DocumentChunk(Base):
@@ -285,4 +286,5 @@ class DocumentChunk(Base):
     token_count: Mapped[int | None] = mapped_column(sa.Integer)
     qdrant_point_id: Mapped[str | None] = mapped_column(sa.String(64))
     meta_json: Mapped[str | None] = mapped_column(sa.Text)
+    document: Mapped["SourceDocument"] = relationship(backref="chunks")
     __table_args__ = (sa.UniqueConstraint("document_id", "chunk_index"),)

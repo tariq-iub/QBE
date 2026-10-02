@@ -1,1 +1,6 @@
-(empty)
+# Python compiled files and caches
+__pycache__/
+*.pyc
+
+# Environment variables (common in backend projects)
+.env

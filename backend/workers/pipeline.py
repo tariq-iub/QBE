@@ -21,12 +21,14 @@ from sqlalchemy.orm import Session
 from backend.core.config import get_settings
 from backend.llm.base import GenParams, ILLMProvider, LLMError
 from backend.models.entities import (
+    DocumentChunk,
     GenerationJob,
     GenerationModel,
     JobCheckpoint,
     JobStatus,
     MCQCandidate,
     MCQOption,
+    MCQSource,
     MCQValidationResult,
     PromptTemplate,
     Topic,

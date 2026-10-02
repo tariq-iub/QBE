@@ -57,7 +57,13 @@ def ingest_bytes(db: Session, *, data: bytes, filename: str, title: str | None =
     db.add(doc)
     db.flush()
 
-    pages = textproc.extract_bytes(filename, data)
+    try:
+        pages = textproc.extract_bytes(filename, data)
+    except (ValueError, RuntimeError) as e:
+        # unsupported type or corrupt/unparseable file (e.g. image-only PDF with
+        # no object structure) -> surface as IngestError, roll back staged rows
+        db.rollback()
+        raise IngestError(str(e)) from e
     chunks = textproc.chunk_pages(pages, target_tokens=s.chunk_target_tokens,
                                   overlap_tokens=s.chunk_overlap_tokens)
     if not chunks:

@@ -57,11 +57,23 @@ class IVectorStore(ABC):
 
 
 def _payload_matches(payload: dict, flt: dict) -> bool:
-    """Simple equality/contains filter: {key: value} or {key: [values]}."""
+    """Filter semantics:
+      - scalar value  => payload[key] == value
+      - list value    => overlap (any element of the filter list is present in
+        the payload value, where a scalar payload value counts as [value]).
+    This gives Qdrant-style "match any of" for topic_ids lists and exact match
+    for scalars like document_id.
+    """
+    def overlaps(pv, fv):
+        pv_set = pv if isinstance(pv, (list, tuple, set)) else [pv]
+        return any(x in pv_set for x in fv)
+
     for k, v in flt.items():
         pv = payload.get(k)
+        if pv is None:
+            return False
         if isinstance(v, (list, tuple, set)):
-            if pv not in v:
+            if not overlaps(pv, v):
                 return False
         elif pv != v:
             return False

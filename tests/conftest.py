@@ -35,7 +35,9 @@ def client(app):
 
 @pytest.fixture()
 def db_session():
-    from backend.database.session import SessionLocal
+    from backend.database.session import SessionLocal, init_db
+
+    init_db()   # idempotent create_all; unit tests may run without the client
     s = SessionLocal()
     try:
         yield s
