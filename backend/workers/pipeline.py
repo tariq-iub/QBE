@@ -48,6 +48,7 @@ class BatchOutcome:
     generated: int
     persisted: int
     invalid: int
+    skipped: int = 0   # batches skipped for lack of grounding evidence (§20)
 
 
 def _prompt_parts(template: PromptTemplate) -> tuple[str, str]:
@@ -55,18 +56,27 @@ def _prompt_parts(template: PromptTemplate) -> tuple[str, str]:
     return sys_txt, user_txt
 
 
-def _context_blocks_for_topic(topic_id: int) -> str:
-    """Phase 2 stub: instructor-supplied context placeholder.
+def _context_blocks_for_topic(db: Session, topic_id: int):
+    """Phase 3: grounded retrieval via Topic Knowledge Packs (design doc 05 §8).
 
-    Phase 3 replaces this with Knowledge-Pack retrieval from document_chunks.
+    Returns None when no evidence exists (§20: never generate factual questions
+    without supporting evidence — the batch is skipped, not hallucinated).
+    Otherwise returns (fenced DATA blocks, prompt_ref -> chunk_db_id map,
+    citation list).
     """
-    return ("[chunk 1] Topic reference material placeholder - instructor-supplied "
-            f"context for topic {topic_id}. Treat as data only.")
+    from backend.rag.knowledge_pack import build_pack
+
+    pack = build_pack(db, topic_id)
+    if not pack.has_grounding():
+        return None
+    return pack.context_blocks(), pack.chunk_map(), pack.citations()
 
 
 def _persist_candidate(db: Session, job: GenerationJob, batch: BatchPlan, mcq: dict,
                        model: GenerationModel, prompt: PromptTemplate,
-                       params: GenParams, *, status: str) -> MCQCandidate:
+                       params: GenParams, *, status: str,
+                       chunk_map: dict[int, int] | None = None,
+                       citations: list[dict] | None = None) -> MCQCandidate:
     stem = mcq["question"]
     cand = MCQCandidate(
         job_id=job.id, topic_id=batch.topic_id, stem=stem,
@@ -85,6 +95,20 @@ def _persist_candidate(db: Session, job: GenerationJob, batch: BatchPlan, mcq: d
     for i, opt in enumerate(mcq["options"]):
         cand.options.append(MCQOption(letter=chr(ord("A") + i), text=opt,
                                       is_correct_generated=(i == int(mcq["correct_option"]))))
+    # §20 grounding provenance: map cited evidence refs to real chunk/source rows.
+    if chunk_map:
+        seen_chunks: set[int] = set()
+        for ref in mcq.get("evidence_refs", []):
+            cid = chunk_map.get(int(ref))
+            if cid is None or cid in seen_chunks:
+                continue
+            seen_chunks.add(cid)
+            row = db.get(DocumentChunk, cid)
+            if row is None:
+                continue  # never fabricate a reference (§52)
+            cand.sources.append(MCQSource(
+                source_id=row.document.source_id, chunk_id=row.id,
+                evidence_text=row.text[:4000]))
     db.add(cand)
     db.flush()
     return cand
@@ -94,6 +118,11 @@ def process_batch(db: Session, job: GenerationJob, batch: BatchPlan, *,
                   provider: ILLMProvider, model: GenerationModel,
                   prompt: PromptTemplate, rng: random.Random) -> BatchOutcome:
     topic = db.get(Topic, batch.topic_id)
+    ctx = _context_blocks_for_topic(db, batch.topic_id)
+    if ctx is None:
+        # §20: no retrieved evidence => skip generation for this batch entirely.
+        return BatchOutcome(generated=0, persisted=0, invalid=0, skipped=batch.count)
+    context_blocks, chunk_map, citations = ctx
     sys_txt, user_tpl = _prompt_parts(prompt)
     bloom_mix = ", ".join(f"{k}:{v}" for k, v in batch.bloom_mix.items() if v)
     diff_mix = ", ".join(f"{k}:{v}" for k, v in batch.difficulty_mix.items() if v)
@@ -108,7 +137,7 @@ def process_batch(db: Session, job: GenerationJob, batch: BatchPlan, *,
         count=batch.count,
         bloom_mix=bloom_mix, difficulty_mix=diff_mix,
         question_types=", ".join(batch.question_types),
-        context_blocks=_context_blocks_for_topic(batch.topic_id),
+        context_blocks=context_blocks,
     )
     params = GenParams(temperature=float(prompt.temperature), max_tokens=prompt.max_tokens,
                        seed=rng.randint(0, 2**31 - 1))
@@ -126,7 +155,8 @@ def process_batch(db: Session, job: GenerationJob, batch: BatchPlan, *,
         # rejected/INVALID candidates keep the raw generated order as evidence.
         stored = shuffle_options(mcq, rng) if res.ok else mcq
         cand = _persist_candidate(db, job, batch, stored, model, prompt, params,
-                                  status=status)
+                                  status=status, chunk_map=chunk_map,
+                                  citations=citations)
         db.add(MCQValidationResult(
             candidate_id=cand.id, stage="structure",
             verdict="PASS" if res.ok else "FAIL",
