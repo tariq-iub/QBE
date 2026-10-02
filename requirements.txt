@@ -1,0 +1,17 @@
+# AI-QBE backend runtime dependencies (pinned for reproducibility, NFR-12)
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.0
+sqlalchemy==2.0.36
+alembic==1.14.0
+psycopg[binary]==3.2.3          # psycopg3 driver for PostgreSQL
+jsonschema==4.23.0
+PyJWT==2.10.1
+passlib[bcrypt]==1.7.4
+redis==5.2.1                    # job queue broker (RQ-style workers in Phase 2b)
+rq==2.0                        # lightweight queue; swapped for internal worker loop if needed
+httpx==0.28.1                   # outbound HTTP for LLM providers + controlled retrieval
+PyMuPDF==1.25.1                 # PDF text extraction (Phase 3)
+python-multipart==0.0.20        # upload forms
+PyYAML==6.0.2                   # legacy source map, domain policy
