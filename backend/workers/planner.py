@@ -80,7 +80,8 @@ def build_plan(*, job_id: int, target_approved: int, overgeneration_factor: floa
             batches.append(BatchPlan(tid, seq, cnt, bloom_mix, diff_mix, qtypes))
             seq += 1
             remaining -= cnt
-    # trim/adjust total to exactly cand_target when per-topic floors inflated it
+    # trim/adjust total to exactly cand_target when per-topic floors inflated it.
+    # Rebuild the trimmed batch's micro-mixes so they always sum to its count.
     total = sum(b.count for b in batches)
     while total > cand_target:
         last = batches[-1]
@@ -88,4 +89,9 @@ def build_plan(*, job_id: int, target_approved: int, overgeneration_factor: floa
         total -= 1
         if last.count == 0:
             batches.pop()
+        else:
+            last.bloom_mix = largest_remainder(last.count, bloom_dist)
+            last.difficulty_mix = largest_remainder(last.count, difficulty_dist)
+            last.question_types = [QUESTION_TYPES[(last.seq + i) % len(QUESTION_TYPES)]
+                                   for i in range(min(3, last.count))]
     return JobPlan(job_id=job_id, candidate_target=cand_target, batches=batches)
