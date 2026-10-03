@@ -20,7 +20,7 @@ from backend.core.config import get_settings
 from backend.models.entities import AcademicSource, Topic
 from backend.rag import ingest
 from backend.retrieval.fetchguard import FetchDenied, FetchedContent, fetch, validate_url
-from backend.retrieval.policy import DomainPolicy, load_policy
+from backend.retrieval.policy import _TIER_RANK, DomainPolicy, load_policy
 from backend.retrieval.sanitize import sanitize_html
 from backend.retrieval.search import ISearchProvider, SearchResult, filter_results, make_search_provider
 
@@ -80,8 +80,17 @@ def load_domain_policy(path: str | None = None) -> DomainPolicy | None:
 # ---------------------------------------------------------------------------
 
 def _candidate_urls(topic: Topic, policy: DomainPolicy,
-                    search: ISearchProvider) -> list[str]:
+                    search: ISearchProvider) -> tuple[list[str], dict[str, str]]:
+    """Returns (approved candidate URLs, {denied_url: reason}).
+
+    Denied-but-requested URLs are *returned as candidates too* (appended after
+    approved ones) so the main loop records an auditable skip reason for each;
+    they can never be fetched because the loop re-validates before any network
+    call. This keeps non-allowlisted seeds out of the per-topic fetch budget
+    while still surfacing them in job reports (§43 observability).
+    """
     urls: list[str] = []
+    denied: dict[str, str] = {}
     urls.extend(policy.seed_urls.get(topic.id, []))
     if policy.search_endpoint:
         q = f"{topic.name} ({topic.subject.name if topic.subject else ''}) academic"
@@ -95,7 +104,19 @@ def _candidate_urls(topic: Topic, policy: DomainPolicy,
         if u not in seen:
             seen.add(u)
             out.append(u)
-    return out[:policy.max_pages_per_topic]
+    # Budget is per *fetched page*: drop URLs whose host fails the static
+    # policy gate (allowlist/blocklist/scheme) before applying
+    # max_pages_per_topic, so one junk seed URL can never starve approved
+    # sources of their fetch budget. DNS pinning still happens at fetch time.
+    allowed = []
+    for u in out:
+        try:
+            validate_url(u, policy, resolve=False)
+        except FetchDenied as e:
+            denied[u] = str(e)
+            continue
+        allowed.append(u)
+    return (allowed + list(denied))[:policy.max_pages_per_topic + len(denied)], denied
 
 
 def research_topic(db: Session, topic_id: int, *, policy: DomainPolicy | None = None,
@@ -117,8 +138,23 @@ def research_topic(db: Session, topic_id: int, *, policy: DomainPolicy | None = 
 
     outcome = ResearchOutcome(topic_id=topic_id)
     search = search or make_search_provider(policy)
-    for url in _candidate_urls(topic, policy, search):
+    candidates, pre_denied = _candidate_urls(topic, policy, search)
+    for url in candidates:
         row: dict = {"url": url, "ingested": False}
+
+        # Governance-first ordering (§6/§35/§36): a URL whose host is not on
+        # the approved allowlist is DENIED before any network attempt — it can
+        # never be fetched, ingested, or reach a Knowledge Pack. The fetch
+        # guard re-checks this (with DNS pinning) at request time; recording
+        # the denial here keeps skip reasons honest and auditable.
+        try:
+            validate_url(url, policy, resolve=False)
+        except FetchDenied as e:
+            row["denied"] = str(e)
+            outcome.skipped_reasons[url] = str(e)
+            outcome.fetched.append(row)
+            continue
+
         try:
             fc = fetch(url, policy, client=client)
         except FetchDenied as e:
@@ -148,13 +184,20 @@ def research_topic(db: Session, topic_id: int, *, policy: DomainPolicy | None = 
                 sd.text.encode("utf-8"), "html"
 
         host = validate_url(fc.final_url, policy)[0]
-        tier = classify_quality_tier(host,
-                                     injection_suspect=url in outcome.injection_quarantined)
-        if _TIER_RANK_LOCAL[tier] > policy.tier_rank():
-            row["denied"] = f"quality tier {tier!r} below minimum {policy.min_source_quality!r}"
+        raw_tier = classify_quality_tier(host)
+        quarantined = url in outcome.injection_quarantined
+        # Quarantine semantics (§35): suspected-injection pages are NOT dropped
+        # (the sanitizer already redacted the instruction-like lines, so the
+        # stored payload is defanged), but they are held to a stricter bar —
+        # they must clear min_source_quality on their own merits *before*
+        # demotion. A demoted tier only labels provenance for ranking/review.
+        if _TIER_RANK[raw_tier] > policy.tier_rank():
+            row["denied"] = (f"quality tier {raw_tier!r} below minimum "
+                             f"{policy.min_source_quality!r}")
             outcome.skipped_reasons[url] = row["denied"]
             outcome.fetched.append(row)
             continue
+        tier = classify_quality_tier(host, injection_suspect=quarantined)
 
         fname = f"web_{host.replace('.', '_')}.{'pdf' if kind == 'pdf' else 'txt'}"
         try:

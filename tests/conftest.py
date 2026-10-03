@@ -83,6 +83,20 @@ def db_session():
         s.close()
 
 
+@pytest.fixture()
+def topic_row(db_session):
+    """A subject + topic row for RAG/retrieval tests (shared across modules)."""
+    from backend.models.entities import Subject, Topic
+
+    subj = Subject(name="TestSubject-ingest", code="TST-ING")
+    db_session.add(subj)
+    db_session.flush()
+    t = Topic(subject_id=subj.id, name="Newton's Laws", importance=5)
+    db_session.add(t)
+    db_session.commit()
+    return t
+
+
 def _all_tables():
     from backend.models.entities import Base
     return list(Base.metadata.sorted_tables)
