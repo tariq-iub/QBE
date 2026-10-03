@@ -1,1 +1,8 @@
-(empty)
+# Compiled/Binary files
+__pycache__/
+*.pyc
+
+# Environment and Secrets
+.env
+.env.local
+.env.*

@@ -15,7 +15,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
-from bs4 import Comment, CData, ProcessingInstruction, Script, Style, Tag
+from bs4 import Comment, CData, ProcessingInstruction
 
 # Elements removed wholesale (content + subtree).
 _DROP_TAGS = {"script", "style", "noscript", "template", "svg", "canvas",
@@ -55,8 +55,6 @@ def sanitize_html(html: bytes | str) -> SanitizedDoc:
 
     dropped: list[str] = []
     for tag in soup.find_all(True):
-        if isinstance(tag, (Script, Style)):
-            continue
         name = (tag.name or "").lower()
         if name in _DROP_TAGS:
             dropped.append(name)

@@ -52,14 +52,40 @@ def isolated_vector_store(tmp_path, monkeypatch):
 
 @pytest.fixture()
 def db_session():
-    from backend.database.session import SessionLocal, init_db
+    """Fresh schema per test.
 
+    Tests share one session-scoped SQLite file (the app's own engine). The
+    previous design leaked rows across tests: SourceDocument.file_hash is a
+    GLOBAL uniqueness key, so an earlier test ingesting bytes X made a later
+    test ingest the same bytes X report deduplicated=True against another
+    test's chunks — order-dependent failures that passed in isolation. Rolling
+    back cannot fix cross-connection visibility either (each connection only
+    sees its own uncommitted rows), so the only sound isolation is to drop and
+    recreate the schema around every test.
+    """
+    from backend.database.session import SessionLocal, init_db
+    from sqlalchemy import text as sa_text
+
+    engine = SessionLocal.kw["bind"] if hasattr(SessionLocal, "kw") else None
     init_db()   # idempotent create_all; unit tests may run without the client
+    if engine is not None and engine.dialect.name == "sqlite":
+        with engine.begin() as conn:
+            for tbl in reversed(_all_tables()):
+                conn.execute(sa_text(f"DROP TABLE IF EXISTS {tbl.name}"))
+    elif engine is not None:  # pragma: no cover - postgres dev parity
+        with engine.begin() as conn:
+            conn.execute(sa_text("TRUNCATE SCHEMA public RESTART IDENTITY CASCADE"))
+    init_db()
     s = SessionLocal()
     try:
         yield s
     finally:
         s.close()
+
+
+def _all_tables():
+    from backend.models.entities import Base
+    return list(Base.metadata.sorted_tables)
 
 
 def make_user(username: str, role: str, password: str = "pw-123456") -> None:

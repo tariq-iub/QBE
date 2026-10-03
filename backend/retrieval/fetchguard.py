@@ -91,7 +91,9 @@ def fetch(url: str, policy: DomainPolicy, *, client: httpx.Client | None = None)
                 resp.close()
                 if not loc:
                     raise FetchDenied("redirect without location")
-                current = httpx.URL(current).join(loc).unicode_string()
+                # httpx <0.24 had URL.unicode_string(); modern httpx str(URL) is
+                # the IRRI-escaped unicode form. Pin >=0.27 in requirements.txt.
+                current = str(httpx.URL(current).join(loc))
                 continue
             if resp.status_code >= 400:
                 resp.close()
