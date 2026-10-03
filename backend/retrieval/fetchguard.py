@@ -51,8 +51,12 @@ def _is_public_ip(ip: str) -> bool:
                 or (addr.version == 6 and addr.is_site_local))
 
 
-def validate_url(url: str, policy: DomainPolicy) -> tuple[str, str]:
-    """Static checks + DNS pinning. Returns (host, pinned_ip). Raises FetchDenied."""
+def validate_url(url: str, policy: DomainPolicy, *, resolve: bool = True) -> tuple[str, str | None]:
+    """Static checks + DNS pinning. Returns (host, pinned_ip). Raises FetchDenied.
+
+    resolve=False performs only the cheap static gate (scheme/credentials/
+    allowlist) — used for candidate pre-filtering without network side effects;
+    actual fetching always re-validates with resolve=True."""
     u = urlparse(url)
     if u.scheme != "https":
         raise FetchDenied(f"scheme {u.scheme!r} not allowed (https only)")
@@ -63,6 +67,8 @@ def validate_url(url: str, policy: DomainPolicy) -> tuple[str, str]:
     host = u.hostname.lower()
     if not policy.domain_allowed(host):
         raise FetchDenied(f"domain {host!r} not in approved allowlist")
+    if not resolve:
+        return host, None
     # Resolve once and pin: prevents TOCTOU DNS rebinding to internal IPs.
     try:
         infos = socket.getaddrinfo(host, u.port or 443, proto=socket.IPPROTO_TCP)

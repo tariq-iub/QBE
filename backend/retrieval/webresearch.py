@@ -20,7 +20,7 @@ from backend.core.config import get_settings
 from backend.models.entities import AcademicSource, Topic
 from backend.rag import ingest
 from backend.retrieval.fetchguard import FetchDenied, FetchedContent, fetch, validate_url
-from backend.retrieval.policy import DomainPolicy, load_policy
+from backend.retrieval.policy import _TIER_RANK, DomainPolicy, load_policy
 from backend.retrieval.sanitize import sanitize_html
 from backend.retrieval.search import ISearchProvider, SearchResult, filter_results, make_search_provider
 
@@ -95,7 +95,18 @@ def _candidate_urls(topic: Topic, policy: DomainPolicy,
         if u not in seen:
             seen.add(u)
             out.append(u)
-    return out[:policy.max_pages_per_topic]
+    # Budget is per *fetched page*: drop URLs whose host fails the static
+    # policy gate (allowlist/blocklist/scheme) before applying
+    # max_pages_per_topic, so one junk seed URL can never starve approved
+    # sources of their fetch budget. DNS pinning still happens at fetch time.
+    allowed = []
+    for u in out:
+        try:
+            validate_url(u, policy, resolve=False)
+        except FetchDenied:
+            continue
+        allowed.append(u)
+    return allowed[:policy.max_pages_per_topic]
 
 
 def research_topic(db: Session, topic_id: int, *, policy: DomainPolicy | None = None,
@@ -119,6 +130,20 @@ def research_topic(db: Session, topic_id: int, *, policy: DomainPolicy | None = 
     search = search or make_search_provider(policy)
     for url in _candidate_urls(topic, policy, search):
         row: dict = {"url": url, "ingested": False}
+
+        # Governance-first ordering (§6/§35/§36): a URL whose host is not on
+        # the approved allowlist is DENIED before any network attempt — it can
+        # never be fetched, ingested, or reach a Knowledge Pack. The fetch
+        # guard re-checks this (with DNS pinning) at request time; recording
+        # the denial here keeps skip reasons honest and auditable.
+        try:
+            validate_url(url, policy, resolve=False)
+        except FetchDenied as e:
+            row["denied"] = str(e)
+            outcome.skipped_reasons[url] = str(e)
+            outcome.fetched.append(row)
+            continue
+
         try:
             fc = fetch(url, policy, client=client)
         except FetchDenied as e:
@@ -150,7 +175,7 @@ def research_topic(db: Session, topic_id: int, *, policy: DomainPolicy | None = 
         host = validate_url(fc.final_url, policy)[0]
         tier = classify_quality_tier(host,
                                      injection_suspect=url in outcome.injection_quarantined)
-        if _TIER_RANK_LOCAL[tier] > policy.tier_rank():
+        if _TIER_RANK[tier] > policy.tier_rank():
             row["denied"] = f"quality tier {tier!r} below minimum {policy.min_source_quality!r}"
             outcome.skipped_reasons[url] = row["denied"]
             outcome.fetched.append(row)
