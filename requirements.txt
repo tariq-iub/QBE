@@ -11,7 +11,7 @@ PyJWT==2.10.1
 passlib[bcrypt]==1.7.4
 redis==5.2.1                    # job queue broker (RQ-style workers in Phase 2b)
 rq==2.0                        # lightweight queue; swapped for internal worker loop if needed
-httpx==0.28.1                   # outbound HTTP for LLM providers + controlled retrieval
+httpx>=0.27,<1.0
 PyMuPDF==1.25.1                 # PDF text extraction (Phase 3)
 python-multipart==0.0.20        # upload forms
 PyYAML==6.0.2                   # legacy source map, domain policy

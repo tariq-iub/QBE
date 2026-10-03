@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -152,6 +153,34 @@ def test_ingest_idempotent_by_hash(db_session, topic_row, tmp_path):
     assert r2["deduplicated"] and r2["document_id"] == r1["document_id"]
 
 
+def test_reingest_self_heals_index_drift(db_session, topic_row, tmp_path):
+    """If the vector index is wiped/reset but chunk rows survive (crash between
+    commit and upsert, or fresh deployment), re-ingesting the same file must
+    rebuild the index rather than silently leave retrieval broken."""
+    from backend.models.entities import DocumentChunk
+    from backend.rag.ingest import ingest_bytes
+    from backend.rag.knowledge_pack import build_pack
+    from backend.rag.vectorstore import get_vector_store, reset_vector_store
+
+    data = _sample_doc_bytes()
+    r1 = ingest_bytes(db_session, data=data, filename="heal.txt",
+                      topic_ids=[topic_row.id], storage_dir=str(tmp_path))
+    assert get_vector_store().count() >= 2
+    assert build_pack(db_session, topic_row.id).has_grounding()
+
+    # simulate drift: wipe in-memory + on-disk index, keep DB rows
+    idx_path = get_vector_store()._path
+    os.remove(idx_path)
+    reset_vector_store()
+    assert not build_pack(db_session, topic_row.id).has_grounding()   # broken state
+
+    r2 = ingest_bytes(db_session, data=data, filename="heal-again.txt",
+                      topic_ids=[topic_row.id], storage_dir=str(tmp_path))
+    assert r2["deduplicated"] and r2["document_id"] == r1["document_id"]
+    assert get_vector_store().count() == db_session.query(DocumentChunk).count()
+    assert build_pack(db_session, topic_row.id).has_grounding()       # healed
+
+
 def test_ingest_rejects_empty_and_scanned(db_session, topic_row, tmp_path):
     from backend.rag.ingest import IngestError, ingest_bytes
 
@@ -176,18 +205,8 @@ def test_pack_grounding_and_data_fencing(db_session, topic_row, tmp_path, monkey
 
     r_ing = ingest_bytes(db_session, data=_sample_doc_bytes(), filename="g.txt",
                  topic_ids=[topic_row.id], storage_dir=str(tmp_path))
-    from backend.models.entities import DocumentChunk as _DC
-    from backend.rag.vectorstore import get_vector_store as _gvs
-    _st = _gvs()
-    print("DBG ingest result:", r_ing, "store:", getattr(_st, "_path", None), "count:", _st.count())
-    print("DBG chunks in db:", db_session.query(_DC).count())
-    if _st.count():
-        pid = next(iter(_st._points))
-        print("DBG payload topic_ids:", _st._points[pid]["payload"].get("topic_ids"), "query topic:", topic_row.id)
+    assert not r_ing["deduplicated"]
     pack = build_pack(db_session, topic_row.id)
-    from backend.rag.vectorstore import get_vector_store as _gvs
-    _st = _gvs()
-    print("DBG store path:", getattr(_st, "_path", None), "count:", _st.count())
     assert pack.has_grounding()
     blocks = pack.context_blocks()
     assert "BEGIN REFERENCE DATA 1" in blocks

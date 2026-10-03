@@ -1,0 +1,52 @@
+# AI-QBE controlled internet retrieval policy (design doc 05, Phase 4).
+# Fetched web text is treated as DATA only, never instructions (§35).
+enabled: true
+
+# Exact hosts or *.suffix entries. Only allowlisted domains can ever be fetched.
+allowed_domains:
+  - "en.wikipedia.org"
+  - "wiki.openstax.org"
+  - "openstax.org"
+  - "phys.libretexts.org"
+  - "chem.libretexts.org"
+  - "math.libretexts.org"
+  - "web.mit.edu"
+  - "ocw.mit.edu"
+  - "nvlpubs.nist.gov"
+  - "physics.nist.gov"
+  - "www.britannica.com"
+  - "khanacademy.org"
+  - "www.khanacademy.org"
+
+blocked_domains:
+  - "blogspot.com"
+  - "quora.com"
+  - "reddit.com"
+  - "medium.com"
+  - "geeksforgeeks.org"
+  - "coursehero.com"
+  - "chegg.com"
+  - "slideshare.net"
+
+# Domain -> source priority (1 = highest authority for this institution)
+priority:
+  openstax.org: 10
+  libretexts.org: 20
+  wikipedia.org: 30
+  khanacademy.org: 30
+  ocw.mit.edu: 10
+  nist.gov: 10
+  britannica.com: 40
+
+# Minimum tier a URL must reach to be fetched at all: authoritative|educational|general
+min_source_quality: educational
+
+max_bytes_per_fetch: 2000000        # hard cap on downloaded content
+max_pages_per_topic: 3              # bounded crawl per topic
+timeout_seconds: 15
+user_agent: "AIQBE-AcademicResearchBot/0.1 (self-hosted question bank; contact: admin@university.example)"
+
+search:
+  provider: null                    # e.g. "searxng"; null => use seed_urls only
+  endpoint: null
+  api_key_env: null                 # name of env var holding the key (never inline)

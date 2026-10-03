@@ -26,8 +26,12 @@ class IngestError(ValueError):
 def ingest_bytes(db: Session, *, data: bytes, filename: str, title: str | None = None,
                  origin: str = "local", url: str | None = None,
                  license_note: str | None = None, topic_ids: list[int] | None = None,
-                 storage_dir: str | None = None) -> dict:
-    """Idempotent ingestion of one document. Returns summary dict."""
+                 storage_dir: str | None = None,
+                 preextracted_text: str | None = None) -> dict:
+    """Idempotent ingestion of one document. Returns summary dict.
+
+    `preextracted_text`: caller already extracted+sanitized the text (web HTML
+    path); skip byte-extraction and chunk this text directly."""
     if not data:
         raise IngestError("empty file")
     s = get_settings()
@@ -37,9 +41,20 @@ def ingest_bytes(db: Session, *, data: bytes, filename: str, title: str | None =
     file_hash = textproc.sha256_hex(data)
     existing_doc = db.query(SourceDocument).filter_by(file_hash=file_hash).first()
     if existing_doc:
+        n_chunks = db.query(DocumentChunk).filter_by(document_id=existing_doc.id).count()
+        # Self-heal DB/vector-index drift: if the index was reset/wiped (or a
+        # previous process died between commit and upsert) but chunk rows
+        # survive, re-embed and re-upsert them. Without this, idempotent
+        # re-ingestion would silently leave retrieval permanently broken.
+        store = get_vector_store()
+        # Probe with a real chunk vector (embed_texts returns list[list[float]]).
+        probe_vec = embed_texts([existing_doc.file_hash or "probe"])[0]
+        missing = not store.search(probe_vec, limit=1,
+                                   flt={"document_id": existing_doc.id})
+        if missing and n_chunks:
+            _reindex_document(db, store, document_id=existing_doc.id)
         return {"document_id": existing_doc.id, "source_id": existing_doc.source_id,
-                "chunks": db.query(DocumentChunk).filter_by(document_id=existing_doc.id).count(),
-                "deduplicated": True}
+                "chunks": n_chunks, "deduplicated": True}
 
     source = AcademicSource(origin=origin, url=url,
                             title=(title or filename)[:512], license_note=license_note)
@@ -58,7 +73,10 @@ def ingest_bytes(db: Session, *, data: bytes, filename: str, title: str | None =
     db.flush()
 
     try:
-        pages = textproc.extract_bytes(filename, data)
+        if preextracted_text is not None:
+            pages = [textproc.RawPage(page=None, section=None, text=preextracted_text)]
+        else:
+            pages = textproc.extract_bytes(filename, data)
     except (ValueError, RuntimeError) as e:
         # unsupported type or corrupt/unparseable file (e.g. image-only PDF with
         # no object structure) -> surface as IngestError, roll back staged rows
@@ -97,6 +115,29 @@ def ingest_bytes(db: Session, *, data: bytes, filename: str, title: str | None =
     get_vector_store().upsert(points)
     return {"document_id": doc.id, "source_id": source.id, "chunks": len(chunks),
             "deduplicated": False}
+
+
+def _reindex_document(db: Session, store, *, document_id: int) -> None:
+    """Rebuild vector-index points for a document whose chunk rows exist in the
+    DB but are missing from the index (crash between commit/upsert, or a wiped
+    index file). Uses each chunk's stored metadata; deterministic re-embedding."""
+    rows = (db.query(DocumentChunk)
+              .filter_by(document_id=document_id)
+              .order_by(DocumentChunk.chunk_index).all())
+    if not rows:
+        return
+    vectors = embed_texts([r.text for r in rows])
+    points: list[VectorPoint] = []
+    for r, vec in zip(rows, vectors):
+        meta = json.loads(r.meta_json or "{}")
+        payload = {
+            "chunk_db_id": r.id, "document_id": document_id,
+            "source_id": meta.get("source_id"),
+            "topic_ids": meta.get("topic_ids", []),
+            "page": r.page, "section": r.section, "text": r.text[:2000],
+        }
+        points.append(VectorPoint(point_id=r.qdrant_point_id, vector=vec, payload=payload))
+    store.upsert(points)
 
 
 def delete_document(db: Session, document_id: int) -> bool:
